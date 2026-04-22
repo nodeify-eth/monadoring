@@ -74,9 +74,6 @@ Supports both Mainnet and Testnet.
 ### Option 1: PM2 (Recommended)
 
 ```bash
-# Install PM2 globally (if not already installed)
-npm install -g pm2
-
 # Clone the repository
 git clone https://github.com/Huginn-Tech/monadoring.git
 cd monadoring
@@ -90,6 +87,9 @@ nano .env  # Edit your configuration
 
 # Build the project
 npm run build
+
+# Install PM2 globally (if not already installed)
+npm install -g pm2
 
 # Start with PM2
 pm2 start npm --name "monadoring" -- start

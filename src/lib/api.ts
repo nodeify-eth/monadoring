@@ -1,9 +1,12 @@
 // API client for Huginn Staking API
 
+export type ValidatorStatus = 'active' | 'inactive'
+
 export interface ValidatorInfo {
   id: number
   name: string
   secp_address: string
+  status?: ValidatorStatus
 }
 
 export interface UptimeStats {
@@ -15,6 +18,7 @@ export interface UptimeStats {
   uptime_percent: number
   last_round: number
   last_block_height: number | null
+  status?: ValidatorStatus
 }
 
 export interface HistoryEvent {
@@ -53,9 +57,9 @@ export async function fetchValidatorInfo(
   try {
     const baseUrl = API_ENDPOINTS[network]
     const res = await fetch(`${baseUrl}/validator/${validatorId}`)
-    
+
     if (!res.ok) return null
-    
+
     const data: ValidatorResponse = await res.json()
     return data.success ? data.validator : null
   } catch (error) {
@@ -71,9 +75,9 @@ export async function fetchUptimeStats(
   try {
     const baseUrl = API_ENDPOINTS[network]
     const res = await fetch(`${baseUrl}/validator/uptime/${validatorId}`)
-    
+
     if (!res.ok) return null
-    
+
     const data: UptimeResponse = await res.json()
     return data.success ? data.uptime : null
   } catch (error) {
@@ -90,12 +94,12 @@ export async function fetchHistory(
   try {
     const baseUrl = API_ENDPOINTS[network]
     const res = await fetch(`${baseUrl}/validator/uptime/${validatorId}/history?limit=${limit}`)
-    
+
     if (!res.ok) return null
-    
+
     const data: HistoryResponse = await res.json()
     if (!data.success) return null
-    
+
     return {
       history: data.history,
       validatorName: data.validator_name
@@ -110,7 +114,7 @@ export async function fetchBlockHeight(rpcUrl: string): Promise<number> {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
-    
+
     const res = await fetch(rpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -122,11 +126,11 @@ export async function fetchBlockHeight(rpcUrl: string): Promise<number> {
       }),
       signal: controller.signal
     })
-    
+
     clearTimeout(timeout)
-    
+
     if (!res.ok) return 0
-    
+
     const data = await res.json()
     return parseInt(data.result, 16)
   } catch (error) {
@@ -135,11 +139,38 @@ export async function fetchBlockHeight(rpcUrl: string): Promise<number> {
   }
 }
 
+export async function fetchCurrentEpoch(
+  network: 'mainnet' | 'testnet'
+): Promise<number | null> {
+  try {
+    const baseUrl = API_ENDPOINTS[network]
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
+
+    const res = await fetch(`${baseUrl}/staking/epoch`, { signal: controller.signal })
+    clearTimeout(timeout)
+
+    if (!res.ok) return null
+
+    const data = await res.json()
+    const candidate =
+      typeof data?.epoch === 'number' ? data.epoch
+      : typeof data?.data?.epoch === 'number' ? data.data.epoch
+      : typeof data?.current_epoch === 'number' ? data.current_epoch
+      : null
+
+    return candidate
+  } catch (error) {
+    console.error('Failed to fetch current epoch:', error)
+    return null
+  }
+}
+
 export async function checkRpcHealth(rpcUrl: string): Promise<boolean> {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
-    
+
     const res = await fetch(rpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -151,11 +182,11 @@ export async function checkRpcHealth(rpcUrl: string): Promise<boolean> {
       }),
       signal: controller.signal
     })
-    
+
     clearTimeout(timeout)
-    
+
     if (!res.ok) return false
-    
+
     const data = await res.json()
     return !!data.result
   } catch {

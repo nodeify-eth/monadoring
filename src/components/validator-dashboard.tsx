@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { ThemeProvider as NextThemesProvider, useTheme as useNextTheme } from "next-themes"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { RefreshCw, Moon, Sun } from "lucide-react"
-import { fetchBlockHeight, checkRpcHealth, fetchUptimeStats, fetchHistory } from "@/lib/api"
+import { fetchBlockHeight, checkRpcHealth, fetchUptimeStats, fetchHistory, type ValidatorStatus } from "@/lib/api"
 
 // ============ EXPORTS ============
 export function ThemeProvider({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) {
@@ -30,6 +30,7 @@ interface ValidatorState {
   uptime: number
   missed: number
   blocks: Block[]
+  status: ValidatorStatus | "unknown"
 }
 
 interface RpcState {
@@ -516,7 +517,8 @@ export function ValidatorDashboard() {
           height: mainnetHeight,
           uptime: uptimeData?.uptime_percent || 0,
           missed: uptimeData?.timeout_count || 0,
-          blocks
+          blocks,
+          status: uptimeData?.status ?? "unknown"
         })
       }
 
@@ -542,7 +544,8 @@ export function ValidatorDashboard() {
           height: testnetHeight,
           uptime: uptimeData?.uptime_percent || 0,
           missed: uptimeData?.timeout_count || 0,
-          blocks
+          blocks,
+          status: uptimeData?.status ?? "unknown"
         })
       }
 
@@ -555,7 +558,8 @@ export function ValidatorDashboard() {
           height: 0,
           uptime: 0,
           missed: 0,
-          blocks: []
+          blocks: [],
+          status: "unknown"
         })
       }
 
@@ -707,11 +711,13 @@ export function ValidatorDashboard() {
                   <span className={`text-[18px] font-semibold ${isDark ? "text-white" : "text-zinc-900"}`}>
                     {network.name}{showValidatorName ? ` - ${v.moniker}` : ""}
                   </span>
-                  {v.height > 0 && (
+                  {v.status !== "unknown" && (
                     <span className={`text-[13px] px-2 py-0.5 rounded-full font-medium ${
-                      isDark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-600"
+                      v.status === "active"
+                        ? isDark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-600"
+                        : isDark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-600"
                     }`}>
-                      Active
+                      {v.status === "active" ? "Active" : "Inactive"}
                     </span>
                   )}
                 </div>

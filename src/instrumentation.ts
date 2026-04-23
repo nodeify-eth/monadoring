@@ -382,8 +382,8 @@ async function checkValidatorMissedBlocks(
 
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
-    const res = await fetch(`${API[network]}/validator/uptime/${validatorId}/history?limit=5`, {
+    const timeout = setTimeout(() => controller.abort(), 15000)
+    const res = await fetch(`${API[network]}/validator/uptime/${validatorId}/history?limit=20`, {
       signal: controller.signal
     })
     clearTimeout(timeout)
@@ -393,16 +393,15 @@ async function checkValidatorMissedBlocks(
     const data = await res.json()
     if (!data.success || !data.history || data.history.length === 0) return
 
-    // Get most recent block
-    const latestBlock = data.history[0]
     const key = `${validatorId}-${network}`
     const prevState = validatorBlockStates.get(key)
+    const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
 
-    // Initialize state if first time
+    // Initialize state on first run without alerting on backlog
     if (!prevState) {
+      const latestBlock = data.history[0]
       const emoji = latestBlock.status === 'timeout' ? '🛑' : '🧊'
       const label = latestBlock.status === 'timeout' ? 'Missed' : 'Finalized'
-      const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
       console.log(`[Monadoring] ${emoji} ${validatorName} ${networkLabel} ~ ${label} round ${latestBlock.round}`)
       validatorBlockStates.set(key, {
         lastRound: latestBlock.round,
@@ -413,70 +412,31 @@ async function checkValidatorMissedBlocks(
       return
     }
 
-    // Check if this is a new block (different round)
-    if (latestBlock.round === prevState.lastRound) {
-      return // Same block, no update
-    }
+    // Collect every event newer than last seen round, oldest first
+    const newEvents = (data.history as Array<{ round: number; height: number | null; status: 'finalized' | 'timeout' }>)
+      .filter((e) => e.round > prevState.lastRound)
+      .sort((a, b) => a.round - b.round)
 
-    // New block detected - log every round
-    const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
-    if (latestBlock.status === 'timeout') {
-      // Missed block!
-      const newMisses = prevState.consecutiveMisses + 1
-      validatorBlockStates.set(key, {
-        lastRound: latestBlock.round,
-        lastStatus: 'timeout',
-        consecutiveMisses: newMisses,
-        alertedForMiss: true
-      })
+    if (newEvents.length === 0) return
 
-      console.log(`[Monadoring] 🛑 ${validatorName} ${networkLabel} ~ Missed round ${latestBlock.round} (streak: ${newMisses})`)
+    const state = { ...prevState }
 
-      // Send alerts
-      const payload = {
-        validator: validatorName,
-        network,
-        height: latestBlock.height,
-        round: latestBlock.round,
-        type: 'missed' as const,
-        consecutiveMisses: newMisses
-      }
+    for (const ev of newEvents) {
+      if (ev.status === 'timeout') {
+        state.consecutiveMisses += 1
+        state.lastRound = ev.round
+        state.lastStatus = 'timeout'
+        state.alertedForMiss = true
 
-      if (cachedConfig.telegram) {
-        await sendTelegramAlert(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
-      }
-      if (cachedConfig.discord) {
-        await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
-      }
-    } else {
-      // Finalized block
-      const hadMisses = prevState.consecutiveMisses > 0 && prevState.alertedForMiss
-
-      validatorBlockStates.set(key, {
-        lastRound: latestBlock.round,
-        lastStatus: 'finalized',
-        consecutiveMisses: 0,
-        alertedForMiss: false
-      })
-
-      if (hadMisses) {
-        const previousStreak = prevState.consecutiveMisses
-        console.log(`[Monadoring] ✅ ${validatorName} ${networkLabel} ~ Recovered round ${latestBlock.round} (streak was: ${previousStreak})`)
-      } else {
-        console.log(`[Monadoring] 🧊 ${validatorName} ${networkLabel} ~ Finalized round ${latestBlock.round}`)
-      }
-
-      // Send recovery alert if we had misses before
-      if (hadMisses) {
-        const previousStreak = prevState.consecutiveMisses
+        console.log(`[Monadoring] 🛑 ${validatorName} ${networkLabel} ~ Missed round ${ev.round} (streak: ${state.consecutiveMisses})`)
 
         const payload = {
           validator: validatorName,
           network,
-          height: latestBlock.height,
-          round: latestBlock.round,
-          type: 'recovered' as const,
-          previousStreak
+          height: ev.height,
+          round: ev.round,
+          type: 'missed' as const,
+          consecutiveMisses: state.consecutiveMisses
         }
 
         if (cachedConfig.telegram) {
@@ -485,9 +445,42 @@ async function checkValidatorMissedBlocks(
         if (cachedConfig.discord) {
           await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
         }
+      } else {
+        const hadMisses = state.consecutiveMisses > 0 && state.alertedForMiss
+        const previousStreak = state.consecutiveMisses
+
+        state.lastRound = ev.round
+        state.lastStatus = 'finalized'
+        state.consecutiveMisses = 0
+        state.alertedForMiss = false
+
+        if (hadMisses) {
+          console.log(`[Monadoring] ✅ ${validatorName} ${networkLabel} ~ Recovered round ${ev.round} (streak was: ${previousStreak})`)
+
+          const payload = {
+            validator: validatorName,
+            network,
+            height: ev.height,
+            round: ev.round,
+            type: 'recovered' as const,
+            previousStreak
+          }
+
+          if (cachedConfig.telegram) {
+            await sendTelegramAlert(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
+          }
+          if (cachedConfig.discord) {
+            await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
+          }
+        } else {
+          console.log(`[Monadoring] 🧊 ${validatorName} ${networkLabel} ~ Finalized round ${ev.round}`)
+        }
       }
     }
+
+    validatorBlockStates.set(key, state)
   } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return
     console.error(`[Monadoring] Missed block check error for ${validatorId}:`, err)
   }
 }
@@ -508,7 +501,7 @@ async function checkValidatorStatus(
 
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
+    const timeout = setTimeout(() => controller.abort(), 15000)
     const res = await fetch(`${API[network]}/validator/uptime/${validatorId}`, {
       signal: controller.signal
     })
@@ -555,6 +548,7 @@ async function checkValidatorStatus(
       await sendDiscordStatusChange(cachedConfig.discord.webhookUrl, payload)
     }
   } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return
     console.error(`[Monadoring] Validator status check error for ${validatorId}:`, err)
   }
 }
@@ -567,7 +561,7 @@ async function fetchEpoch(network: 'mainnet' | 'testnet'): Promise<number | null
 
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
+    const timeout = setTimeout(() => controller.abort(), 15000)
     const res = await fetch(`${API[network]}/staking/epoch`, { signal: controller.signal })
     clearTimeout(timeout)
 

@@ -1,7 +1,7 @@
 // Next.js Instrumentation - runs on server startup
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
-import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert } from '@/lib/alerts'
+import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendTelegramStatusChange, sendDiscordStatusChange } from '@/lib/alerts'
 
 let shutdownHandlersRegistered = false
 let missedBlockCheckInterval: NodeJS.Timeout | null = null
@@ -14,6 +14,9 @@ interface ValidatorBlockState {
   alertedForMiss: boolean
 }
 const validatorBlockStates: Map<string, ValidatorBlockState> = new Map()
+
+// Track validator active/inactive set membership
+const validatorStatusStates: Map<string, 'active' | 'inactive'> = new Map()
 let cachedConfig: Awaited<ReturnType<typeof getAlertConfig>> | null = null
 let rpcHealthCheckInterval: NodeJS.Timeout | null = null
 
@@ -489,6 +492,97 @@ async function checkValidatorMissedBlocks(
   }
 }
 
+// Check validator active/inactive set membership
+async function checkValidatorStatus(
+  validatorId: string,
+  network: 'mainnet' | 'testnet',
+  validatorName: string,
+  currentEpoch: number | null
+) {
+  if (!cachedConfig) return
+
+  const API = {
+    mainnet: 'https://validator-api.huginn.tech/monad-api',
+    testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
+  }
+
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
+    const res = await fetch(`${API[network]}/validator/uptime/${validatorId}`, {
+      signal: controller.signal
+    })
+    clearTimeout(timeout)
+
+    if (!res.ok) return
+
+    const data = await res.json()
+    if (!data.success || !data.uptime) return
+
+    const currentStatus = data.uptime.status
+
+    if (currentStatus !== 'active' && currentStatus !== 'inactive') return
+
+    const key = `${validatorId}-${network}`
+    const prevStatus = validatorStatusStates.get(key)
+
+    // Initialize on first run without alerting
+    if (!prevStatus) {
+      validatorStatusStates.set(key, currentStatus)
+      return
+    }
+
+    if (prevStatus === currentStatus) return
+
+    validatorStatusStates.set(key, currentStatus)
+
+    const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
+    const epochPart = currentEpoch !== null ? ` (Epoch ${currentEpoch})` : ''
+    const emoji = currentStatus === 'active' ? '🟢' : '🔴'
+    console.log(`[Monadoring] ${emoji} ${validatorName} ${networkLabel} ~ now in ${currentStatus} set${epochPart}`)
+
+    const payload = {
+      validator: validatorName,
+      network,
+      status: currentStatus as 'active' | 'inactive',
+      epoch: currentEpoch ?? undefined
+    }
+
+    if (cachedConfig.telegram) {
+      await sendTelegramStatusChange(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
+    }
+    if (cachedConfig.discord) {
+      await sendDiscordStatusChange(cachedConfig.discord.webhookUrl, payload)
+    }
+  } catch (err) {
+    console.error(`[Monadoring] Validator status check error for ${validatorId}:`, err)
+  }
+}
+
+async function fetchEpoch(network: 'mainnet' | 'testnet'): Promise<number | null> {
+  const API = {
+    mainnet: 'https://validator-api.huginn.tech/monad-api',
+    testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
+  }
+
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
+    const res = await fetch(`${API[network]}/staking/epoch`, { signal: controller.signal })
+    clearTimeout(timeout)
+
+    if (!res.ok) return null
+
+    const data = await res.json()
+    if (typeof data?.epoch === 'number') return data.epoch
+    if (typeof data?.data?.epoch === 'number') return data.data.epoch
+    if (typeof data?.current_epoch === 'number') return data.current_epoch
+    return null
+  } catch {
+    return null
+  }
+}
+
 // Run missed block check for all validators
 async function runMissedBlockCheck() {
   if (!cachedConfig) return
@@ -496,14 +590,21 @@ async function runMissedBlockCheck() {
   const mainnetValidators = (process.env.MAINNET_VALIDATORS || '').split(',').map(s => s.trim()).filter(Boolean)
   const testnetValidators = (process.env.TESTNET_VALIDATORS || '').split(',').map(s => s.trim()).filter(Boolean)
 
+  const mainnetEpoch = mainnetValidators.length > 0 ? await fetchEpoch('mainnet') : null
+  const testnetEpoch = testnetValidators.length > 0 ? await fetchEpoch('testnet') : null
+
   // Check mainnet validators
   for (const validatorId of mainnetValidators) {
-    await checkValidatorMissedBlocks(validatorId, 'mainnet', cachedConfig.validatorName || validatorId)
+    const name = cachedConfig.validatorName || validatorId
+    await checkValidatorMissedBlocks(validatorId, 'mainnet', name)
+    await checkValidatorStatus(validatorId, 'mainnet', name, mainnetEpoch)
   }
 
   // Check testnet validators
   for (const validatorId of testnetValidators) {
-    await checkValidatorMissedBlocks(validatorId, 'testnet', cachedConfig.validatorName || validatorId)
+    const name = cachedConfig.validatorName || validatorId
+    await checkValidatorMissedBlocks(validatorId, 'testnet', name)
+    await checkValidatorStatus(validatorId, 'testnet', name, testnetEpoch)
   }
 }
 

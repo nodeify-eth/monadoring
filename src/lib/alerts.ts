@@ -37,6 +37,13 @@ interface RpcAlertPayload {
   chainProgressing?: boolean // true if uptime API shows new blocks
 }
 
+interface StatusChangePayload {
+  validator: string
+  network: 'mainnet' | 'testnet'
+  status: 'active' | 'inactive'
+  epoch?: number
+}
+
 // RPC Telegram Alert
 export async function sendTelegramRpcAlert(
   botToken: string,
@@ -266,6 +273,73 @@ export async function sendLifecycleNotifications(
   return {
     telegram: results[0],
     discord: results[1]
+  }
+}
+
+// Validator set status change (active <-> inactive) - Telegram
+export async function sendTelegramStatusChange(
+  botToken: string,
+  chatId: string,
+  payload: StatusChangePayload
+): Promise<boolean> {
+  if (!botToken || !chatId) return false
+
+  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
+  const emoji = payload.status === 'active' ? '🟢' : '🔴'
+  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
+
+  const message = `${emoji} ${network} validator *${payload.validator}* now in *${payload.status}* set${epochPart}`
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: 'Markdown'
+      })
+    })
+    return res.ok
+  } catch (error) {
+    console.error('Telegram status change alert failed:', error)
+    return false
+  }
+}
+
+// Validator set status change (active <-> inactive) - Discord
+export async function sendDiscordStatusChange(
+  webhookUrl: string,
+  payload: StatusChangePayload
+): Promise<boolean> {
+  if (!webhookUrl) return false
+
+  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
+  const emoji = payload.status === 'active' ? '🟢' : '🔴'
+  const color = payload.status === 'active' ? 0x22c55e : 0xef4444
+  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
+
+  const description = `${emoji} ${network} validator **${payload.validator}** now in **${payload.status}** set${epochPart}`
+
+  const embed = {
+    embeds: [{
+      description,
+      color,
+      footer: { text: 'Monadoring' },
+      timestamp: new Date().toISOString()
+    }]
+  }
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(embed)
+    })
+    return res.ok
+  } catch (error) {
+    console.error('Discord status change alert failed:', error)
+    return false
   }
 }
 
